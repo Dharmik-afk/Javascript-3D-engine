@@ -1,0 +1,155 @@
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>Live Server</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #0f0f1a;
+      font-family: 'Segoe UI', sans-serif;
+    }
+
+    .screen {
+      margin: 40px;
+      margin-left: 20em;
+      margin-right: 20em;
+    }
+
+    .wasd-pad {
+      display: grid;
+      grid-template-areas: ".  w  ." "a  s  d";
+      grid-template-columns: repeat(3, 144px);
+      grid-template-rows: repeat(2, 144px);
+      gap: 20px;
+    }
+
+    .key {
+      position: relative;
+      border-radius: 12px;
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      background: linear-gradient(145deg, #1e1e3a, #13132a);
+      border: 1px solid #3a3a6a;
+      box-shadow: 0 6px 0 #0a0a18, 0 8px 16px #00000060, inset 0 1px 0 #ffffff12;
+      transition: transform 0.08s ease, box-shadow 0.08s ease, background 0.08s ease;
+    }
+
+    .key[data-key="w"] {
+      grid-area: w;
+    }
+
+    .key[data-key="a"] {
+      grid-area: a;
+    }
+
+    .key[data-key="s"] {
+      grid-area: s;
+    }
+
+    .key[data-key="d"] {
+      grid-area: d;
+    }
+
+    .key .label {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #c0c8ff;
+      text-shadow: 0 0 8px #7b8cff66;
+      transition: color 0.08s;
+    }
+
+    .key .hint {
+      font-size: 0.55rem;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: #5a5a88;
+    }
+
+    .key .arrow {
+      position: absolute;
+      transform-origin: 50% 50%;
+      top: 12px;
+      font-size: 1.4rem;
+      opacity: 0.25;
+      color: #fff;
+    }
+
+    .key.pressed {
+      transform: translateY(4px);
+      box-shadow: 0 2px 0 #0a0a18, 0 4px 8px #00000060,
+        inset 0 2px 6px #00000040, 0 0 20px #7b8cff66;
+      background: linear-gradient(145deg, #2a2a55, #1a1a3a);
+      border-color: #7b8cff;
+    }
+
+    .key.pressed .label {
+      color: #fff;
+      text-shadow: 0 0 12px #7b8cffcc;
+    }
+
+    .key.pressed .hint {
+      color: #9090cc;
+    }
+
+    @keyframes ripple {
+      from {
+        opacity: 0.6;
+        transform: scale(0.8);
+      }
+
+      to {
+        opacity: 0;
+        transform: scale(2.2);
+      }
+    }
+
+    .ripple {
+      position: absolute;
+      inset: 0;
+      border-radius: 12px;
+      border: 2px solid #7b8cff;
+      animation: ripple 0.4s ease-out forwards;
+      pointer-events: none;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="c" class="screen" width="800" height="400"></canvas>
+
+  <div class="wasd-pad">
+    <div class="key" data-key="w" tabindex="0">
+      <span class="arrow">▲</span><span class="label">W</span><span class="hint">Forward</span>
+    </div>
+    <div class="key" data-key="a" tabindex="0">
+      <span class="arrow">◀</span><span class="label">A</span><span class="hint">Left</span>
+    </div>
+    <div class="key" data-key="s" tabindex="0">
+      <span class="arrow">▼</span><span class="label">S</span><span class="hint">Back</span>
+    </div>
+    <div class="key" data-key="d" tabindex="0">
+      <span class="arrow">▶</span><span class="label">D</span><span class="hint">Right</span>
+    </div>
+  </div>
+
+  <!-- ES module entry point — browser resolves all imports automatically -->
+  <script type="module" src="main.js"></script>
+</body>
+
+</html>
