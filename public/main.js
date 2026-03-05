@@ -7,11 +7,14 @@
 //  it only calls into the appropriate modules.
 // ─────────────────────────────────────────────
 
-import { Buffers }                  from './buffers.js';
-import { Player }                   from './player.js';
-import { init as initInput }        from './input.js';
-import { buildBackground, castRays} from './renderer.js';
-import { drawMinimap, drawDebug }   from './hud.js';
+import { Buffers } from './buffers.js';
+import { Player } from './player.js';
+import { init as initInput } from './input.js';
+import { buildBackground, castRays } from './renderer.js';
+import { drawMinimap, drawDebug } from './hud.js';
+
+// ── Debug flags ──────────────────────────────────────────────────
+const SHOW_BUCKETS = false;   // true → bucket grid overlay on minimap
 
 // ── Bootstrap ────────────────────────────────────────────────────
 const player = new Player(8.5, 4.5);
@@ -19,8 +22,8 @@ initInput(player);       // attaches WASD pad, keyboard, look-drag
 buildBackground();       // writes sky + floor into Buffers.bg once
 
 // ── FPS counter state ────────────────────────────────────────────
-let fps         = 0;
-let frames      = 0;
+let fps = 0;
+let frames = 0;
 let lastFpsTime = performance.now();
 
 // ── Render ───────────────────────────────────────────────────────
@@ -33,7 +36,7 @@ function render() {
   Buffers.flush();
 
   // Layer 2 — HUD: ctx drawn on top of the composited image
-  drawMinimap(player);
+  drawMinimap(player, SHOW_BUCKETS);
   drawDebug(player, fps);
 }
 
@@ -42,8 +45,8 @@ function engine(ts) {
   // FPS counter — updates once per second
   frames++;
   if (ts - lastFpsTime >= 1000) {
-    fps         = frames;
-    frames      = 0;
+    fps = frames;
+    frames = 0;
     lastFpsTime = ts;
   }
 
@@ -53,3 +56,4 @@ function engine(ts) {
 }
 
 requestAnimationFrame(engine);
+

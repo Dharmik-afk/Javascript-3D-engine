@@ -3,13 +3,16 @@
 //  Player state, movement physics, and
 //  segment-normal push-out collision.
 //
+//  Extends Entity for shared pos, angle,
+//  velocity, and radius.
+//
 //  Collision algorithm (runs 3 iterations / frame):
 //    1. Apply velocity to position unconditionally.
 //    2. Gather unique segment indices from the 3×3
 //       bucket neighbourhood around the player.
 //    3. For each segment, find the closest point on
 //       the segment to the player centre.
-//    4. If dist < RADIUS, push the player out along
+//    4. If dist < radius, push the player out along
 //       the contact normal and remove the velocity
 //       component directed into the wall — giving
 //       true wall-normal sliding on any geometry.
@@ -17,19 +20,17 @@
 //  All coordinates are tile-space floats.
 // ─────────────────────────────────────────────
 
+import { Entity } from './entity.js';
 import { WALLS, getSegments } from './map.js';
 
-export class Player {
+export class Player extends Entity {
   static FRICTION = 0.82;
   static ACCEL = 0.04;    // tiles / frame²
-  static RADIUS = 0.25;    // collision bounding radius (tiles)
   static LOOK_SENSITIVITY = 0.007;   // radians per drag-pixel
 
   constructor(x, y) {
-    this.pos = { x, y };
-    this.angle = 0;
+    super(x, y, 0.25);
     this.input = { x: 0, y: 0 };
-    this.velocity = { x: 0, y: 0 };
     this.lookDeltaX = 0;
   }
 
@@ -84,7 +85,7 @@ export class Player {
     // ── Segment push-out collision (3 iterations) ───────────────
     //   Multiple iterations resolve corner cases where two walls
     //   are simultaneously penetrated (e.g. tight corridor ends).
-    const R = Player.RADIUS;
+    const R = this.radius;
 
     for (let iter = 0; iter < 3; iter++) {
       const tx = this.pos.x | 0;

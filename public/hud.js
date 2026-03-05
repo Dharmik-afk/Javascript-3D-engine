@@ -3,20 +3,18 @@
 //  HUD layer — drawn directly with ctx on top of
 //  the composited pixel buffers (layer 2).
 //
-//  drawMinimap(player)
+//  drawMinimap(player, showBuckets)
 //    Top-right corner: world bounds background,
 //    wall segments, player dot, facing line,
 //    and FOV cone.
+//    showBuckets — controlled by SHOW_BUCKETS in
+//    main.js. When true:
+//      Occupied cells — flat blue-white tint.
+//      Player's current cell — flat red tint.
+//      Grid lines drawn under segments.
 //
 //  drawDebug(player, fps)
 //    Top-left corner numeric readout.
-//
-//  toggleBuckets()
-//    Call from devtools console to toggle bucket
-//    grid overlay on the minimap.
-//    Occupied cells — flat blue-white tint.
-//    Player's current cell — flat red tint.
-//    Grid lines always drawn when overlay is on.
 // ─────────────────────────────────────────────
 
 import { ctx, W } from './canvas.js';
@@ -31,20 +29,13 @@ const MM_PAD = 8;                                   // gap from canvas edge
 const MM_X = W - WORLD_W * MM_TILE - MM_PAD;     // left edge of minimap
 const MM_Y = MM_PAD;                              // top edge of minimap
 
-// ── Bucket visualisation toggle ──────────────────────────────────
-let _showBuckets = false;
-export function toggleBuckets() {
-  _showBuckets = !_showBuckets;
-  console.log(`[hud] bucket overlay: ${_showBuckets ? 'ON' : 'OFF'}`);
-}
-
-export function drawMinimap(player) {
+export function drawMinimap(player, showBuckets) {
   // ── World bounds background ─────────────────────────────────
   ctx.fillStyle = '#0c0c1c';
   ctx.fillRect(MM_X, MM_Y, WORLD_W * MM_TILE, WORLD_H * MM_TILE);
 
   // ── Bucket overlay ───────────────────────────────────────────
-  if (_showBuckets) {
+  if (showBuckets) {
     const playerTX = player.pos.x | 0;
     const playerTY = player.pos.y | 0;
 
