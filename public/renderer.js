@@ -5,6 +5,9 @@
 //  buildBackground()
 //    Writes a static sky + floor gradient into
 //    Buffers.bg (layer 0).  Called once at startup.
+//    Uses Uint32Array writes (1 write per pixel).
+//    Row colour is computed once and broadcast
+//    across the full row width.
 //
 //  castRays(player)
 //    Vector raycaster.  For every screen column:
@@ -17,15 +20,16 @@
 //      5. Compute perpendicular distance (no fisheye) and
 //         draw a distance-shaded vertical wall strip
 //
-//  Ray parameterisation: P + t·D, where D = (rayDirX, rayDirY)
-//  is the un-normalised ray direction (same as the original DDA).
-//  The intersection t is in the same space as sideDistX/Y, so
-//  the early-exit comparison is numerically consistent.
-//
-//  Perpendicular distance:
-//    perpWallDist = t · dot(rayDir, dir)
-//  Projects the hit onto the forward axis — identical guarantee
-//  to the original perpendicular formula, no fisheye.
+//  Hot-path pixel write optimisations
+//  ───────────────────────────────────
+//  • Colour is packed to a single uint32 once per column,
+//    outside the vertical strip loop.
+//  • Strip loop uses a running index (idx += W) instead of
+//    recomputing y * W + x every iteration — replaces a
+//    multiply with a cheaper add.
+//  • Writes directly to Buffers.world.data32 — no putPixel
+//    function call overhead, no per-pixel bounds check
+//    (drawStart / drawEnd are already clamped to [0, H)).
 //
 //  FOV = 60°  →  camera-plane half-length = tan(30°) ≈ 0.57735
 // ─────────────────────────────────────────────
@@ -41,31 +45,35 @@ const FOV_HALF_TAN = Math.tan(Math.PI / 6);   // tan(30°)
 
 // ── Layer 0: static sky + floor gradient ────────────────────────
 export function buildBackground() {
-  const buf = Buffers.bg;
-  buf.clear();
+  const buf32 = Buffers.bg.data32;
+  const halfH = H >> 1;
 
-  // Sky  — top half, deep navy → lighter blue at horizon
-  for (let y = 0; y < H / 2; y++) {
-    const t = y / (H / 2);
+  // Sky — top half, deep navy → lighter blue at horizon
+  for (let y = 0; y < halfH; y++) {
+    const t = y / halfH;
     const r = (8 + t * 18) | 0;
     const g = (8 + t * 20) | 0;
     const b = (22 + t * 55) | 0;
-    for (let x = 0; x < W; x++) buf.putPixel(x, y, r, g, b, 255);
+    const color = (0xFF000000 | (b << 16) | (g << 8) | r) >>> 0;
+    const rowOff = y * W;
+    for (let x = 0; x < W; x++) buf32[rowOff + x] = color;
   }
 
   // Floor — bottom half, dark stone, slightly lighter toward horizon
-  for (let y = H / 2; y < H; y++) {
-    const t = (y - H / 2) / (H / 2);
+  for (let y = halfH; y < H; y++) {
+    const t = (y - halfH) / halfH;
     const r = (28 + t * 14) | 0;
     const g = (24 + t * 8) | 0;
     const b = (20 + t * 6) | 0;
-    for (let x = 0; x < W; x++) buf.putPixel(x, y, r, g, b, 255);
+    const color = (0xFF000000 | (b << 16) | (g << 8) | r) >>> 0;
+    const rowOff = y * W;
+    for (let x = 0; x < W; x++) buf32[rowOff + x] = color;
   }
 }
 
 // ── Layer 1: vector raycaster ────────────────────────────────────
 export function castRays(player) {
-  const buf = Buffers.world;
+  const data32 = Buffers.world.data32;
 
   const px = player.pos.x;
   const py = player.pos.y;
@@ -90,7 +98,7 @@ export function castRays(player) {
     let mapX = px | 0;
     let mapY = py | 0;
 
-    // DDA step distances — same sentinel as original
+    // DDA step distances — sentinel for near-zero direction
     const deltaDistX = Math.abs(rayDirX) < 1e-10 ? 1e30 : Math.abs(1 / rayDirX);
     const deltaDistY = Math.abs(rayDirY) < 1e-10 ? 1e30 : Math.abs(1 / rayDirY);
 
@@ -119,39 +127,28 @@ export function castRays(player) {
 
     while (true) {
 
-      // Test every segment registered in this bucket
       for (const i of getSegments(mapX, mapY)) {
         const seg = WALLS[i];
 
-        // 2D ray-segment intersection
-        // Ray:     P + t·D,          t ≥ 0
-        // Segment: A + u·(B−A),  0 ≤ u ≤ 1
-        // Let E = B−A,  F = A−P
-        // denom = cross(D, E) = Dx·Ey − Dy·Ex
-        // t     = cross(F, E) / denom
-        // u     = cross(F, D) / denom
         const ex = seg.x2 - seg.x1;
         const ey = seg.y2 - seg.y1;
         const fx = seg.x1 - px;
         const fy = seg.y1 - py;
         const denom = rayDirX * ey - rayDirY * ex;
 
-        if (Math.abs(denom) < 1e-10) continue;   // parallel
+        if (Math.abs(denom) < 1e-10) continue;
 
         const t = (fx * ey - fy * ex) / denom;
         const u = (fx * rayDirY - fy * rayDirX) / denom;
 
-        // t > 1e-4 prevents self-intersection when touching a wall
         if (t > 1e-4 && u >= 0 && u <= 1 && t < bestT) {
           bestT = t;
           bestSeg = i;
         }
       }
 
-      // Early exit: next bucket boundary is beyond the closest hit
       if (bestT < Infinity && Math.min(sideDistX, sideDistY) > bestT) break;
 
-      // Advance DDA to next bucket
       if (sideDistX < sideDistY) {
         sideDistX += deltaDistX;
         mapX += stepX;
@@ -160,35 +157,27 @@ export function castRays(player) {
         mapY += stepY;
       }
 
-      // Safety: ray left the world with no hit
       if (mapX < 0 || mapX >= WORLD_W || mapY < 0 || mapY >= WORLD_H) break;
     }
 
-    if (bestSeg < 0) continue;   // no hit — skip column
+    if (bestSeg < 0) continue;
 
     // ── Perpendicular distance (no fisheye) ───────────────────
-    // Projects hit distance onto the forward axis via dot product.
-    // When camX = 0 (centre ray) dot = 1 so perpDist = bestT exactly.
     const perpWallDist = bestT * (rayDirX * dirX + rayDirY * dirY);
     if (perpWallDist <= 0) continue;
 
-    // ── Vertical strip ────────────────────────────────────────
+    // ── Vertical strip bounds ─────────────────────────────────
     const lineHeight = Math.min(H * 4, (H / perpWallDist) | 0);
     const drawStart = Math.max(0, (H - lineHeight) >> 1);
     const drawEnd = Math.min(H, drawStart + lineHeight);
 
     // ── Shading ───────────────────────────────────────────────
-    // Normal of the hit segment: N = (−Ey, Ex) (unnormalised).
-    // |Nx / |N|| → 1 for E/W-facing walls (brighter),
-    //            → 0 for N/S-facing walls (darker).
-    // Matches the original side-0 / side-1 shading convention.
     const seg = WALLS[bestSeg];
     const sex = seg.x2 - seg.x1;
     const sey = seg.y2 - seg.y1;
     const slen = Math.hypot(sex, sey) || 1;
-    const shade = 0.55 + 0.45 * Math.abs(-sey / slen);   // 0.55–1.0
+    const shade = 0.55 + 0.45 * Math.abs(-sey / slen);
 
-    // Fog fades distant walls to black proportionally
     const fog = Math.min(1, perpWallDist / 12);
     const scale = (1 - fog * 0.85) * shade;
 
@@ -196,8 +185,13 @@ export function castRays(player) {
     const wg = (seg.g * scale) | 0;
     const wb = (seg.b * scale) | 0;
 
-    for (let y = drawStart; y < drawEnd; y++) {
-      buf.putPixel(x, y, wr, wg, wb, 255);
+    // ── Pack colour once; write strip with stride increment ───
+    // Avoids y * W + x multiply inside the loop — replaced by idx += W.
+    // No bounds check needed: drawStart and drawEnd are clamped to [0, H).
+    const color32 = (0xFF000000 | (wb << 16) | (wg << 8) | wr) >>> 0;
+    let idx = drawStart * W + x;
+    for (let y = drawStart; y < drawEnd; y++, idx += W) {
+      data32[idx] = color32;
     }
   }
 }

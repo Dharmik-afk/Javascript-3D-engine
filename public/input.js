@@ -9,11 +9,19 @@
 //  no other module needs to import input.js
 //  directly — they just subscribe.
 //
+//  Touch pad uses a global drag tracker so that
+//  dragging from one key to another correctly
+//  releases the old key and presses the new one.
+//  Two Maps drive this:
+//    touchKeyMap : touchId  → keyEl currently held (or null)
+//    keyTouches  : keyEl    → Set of touchIds pressing it
+//  A key is only released once all fingers leave it.
+//
 //  call init(player) once after the player is
 //  created to attach the look-drag accumulator.
 // ─────────────────────────────────────────────
 
-import { c }        from './canvas.js';
+import { c } from './canvas.js';
 import { EventBus } from './eventbus.js';
 
 // ── Internal key state ───────────────────────────────────────────
@@ -45,49 +53,83 @@ function releaseKey(keyEl) {
   EventBus.emit('keyrelease', { key: k.toUpperCase(), timestamp: Date.now() });
 }
 
-// ── WASD on-screen pad ───────────────────────────────────────────
-function setupKeyInteraction(keyEl) {
-  let mouseActive = false;
-  const activeTouches = new Set();
-  const touchesInside = new Set();
-  const isPressed     = () => mouseActive || touchesInside.size > 0;
+// ── WASD on-screen pad — mouse ───────────────────────────────────
+//   Mouse doesn't need cross-key drag, so per-element listeners are fine.
+function setupKeyMouse(keyEl) {
+  keyEl.addEventListener('mousedown', () => pressKey(keyEl, 'mouse'));
+  keyEl.addEventListener('mouseup', () => releaseKey(keyEl));
+  keyEl.addEventListener('mouseleave', () => releaseKey(keyEl));
+}
 
-  function updateState(source) {
-    isPressed() ? pressKey(keyEl, source) : releaseKey(keyEl);
+// ── WASD on-screen pad — touch (global, cross-key drag) ──────────
+//   touchKeyMap : touchId → keyEl currently pressed by this touch (null if none)
+//   keyTouches  : keyEl   → Set of touchIds currently pressing it
+//   A key fires releaseKey only when its Set empties — handles two-finger same-key correctly.
+const touchKeyMap = new Map();
+const keyTouches = new Map();
+
+function getKeyAtPoint(x, y) {
+  const el = document.elementFromPoint(x, y);
+  return el ? el.closest('.key') : null;
+}
+
+function touchPressKey(keyEl, touchId) {
+  if (!keyTouches.has(keyEl)) keyTouches.set(keyEl, new Set());
+  keyTouches.get(keyEl).add(touchId);
+  pressKey(keyEl, 'touch');
+}
+
+function touchReleaseKey(keyEl, touchId) {
+  const set = keyTouches.get(keyEl);
+  if (!set) return;
+  set.delete(touchId);
+  if (set.size === 0) {
+    keyTouches.delete(keyEl);
+    releaseKey(keyEl);
   }
+}
 
-  keyEl.addEventListener('mousedown',  () => { mouseActive = true;  updateState('mouse'); });
-  keyEl.addEventListener('mouseup',    () => { mouseActive = false; updateState(); });
-  keyEl.addEventListener('mouseleave', () => { mouseActive = false; updateState(); });
-
-  keyEl.addEventListener('touchstart', e => {
-    e.preventDefault();
+function setupPadTouch() {
+  // touchstart — only intercept touches that land on a .key element
+  document.addEventListener('touchstart', e => {
     for (const t of e.changedTouches) {
-      activeTouches.add(t.identifier);
-      touchesInside.add(t.identifier);
+      const keyEl = getKeyAtPoint(t.clientX, t.clientY);
+      if (!keyEl) continue;
+      e.preventDefault();                          // suppress scroll / tap-highlight
+      touchKeyMap.set(t.identifier, keyEl);
+      touchPressKey(keyEl, t.identifier);
     }
-    updateState('touch');
   }, { passive: false });
 
+  // touchmove — swap press to whatever key the finger is now over
   document.addEventListener('touchmove', e => {
-    const rect = keyEl.getBoundingClientRect();
+    let handled = false;
+
     for (const t of e.changedTouches) {
-      if (!activeTouches.has(t.identifier)) continue;
-      const inside = t.clientX >= rect.left && t.clientX <= rect.right &&
-                     t.clientY >= rect.top  && t.clientY <= rect.bottom;
-      inside ? touchesInside.add(t.identifier) : touchesInside.delete(t.identifier);
+      if (!touchKeyMap.has(t.identifier)) continue;
+      handled = true;
+
+      const prevKey = touchKeyMap.get(t.identifier);
+      const nextKey = getKeyAtPoint(t.clientX, t.clientY);
+
+      if (nextKey === prevKey) continue;           // still on same key — nothing to do
+
+      if (prevKey) touchReleaseKey(prevKey, t.identifier);
+      if (nextKey) touchPressKey(nextKey, t.identifier);
+      touchKeyMap.set(t.identifier, nextKey ?? null);
     }
-    updateState();
-  }, { passive: true });
+
+    if (handled) e.preventDefault();
+  }, { passive: false });
 
   function handleTouchEnd(e) {
     for (const t of e.changedTouches) {
-      activeTouches.delete(t.identifier);
-      touchesInside.delete(t.identifier);
+      const keyEl = touchKeyMap.get(t.identifier);
+      if (keyEl) touchReleaseKey(keyEl, t.identifier);
+      touchKeyMap.delete(t.identifier);
     }
-    updateState();
   }
-  document.addEventListener('touchend',    handleTouchEnd, { passive: true });
+  document.addEventListener('touchend', handleTouchEnd, { passive: true });
   document.addEventListener('touchcancel', handleTouchEnd, { passive: true });
 }
 
@@ -111,12 +153,15 @@ document.addEventListener('keyup', e => {
 const lookState = new Map();
 
 export function init(player) {
-  // Attach WASD pad to every .key element
-  document.querySelectorAll('.key').forEach(setupKeyInteraction);
+  // Attach mouse handlers to every .key element
+  document.querySelectorAll('.key').forEach(setupKeyMouse);
+
+  // Attach global touch handler for cross-key drag
+  setupPadTouch();
 
   // Wire EventBus → player methods
-  EventBus.on('keypress',  ({ key }) => player.onKeyDown(key));
-  EventBus.on('keyrelease',({ key }) => player.onKeyUp(key));
+  EventBus.on('keypress', ({ key }) => player.onKeyDown(key));
+  EventBus.on('keyrelease', ({ key }) => player.onKeyUp(key));
 
   // Canvas touch-look
   c.addEventListener('touchstart', e => {
@@ -136,6 +181,7 @@ export function init(player) {
   function clearLook(e) {
     for (const t of e.changedTouches) lookState.delete(t.identifier);
   }
-  c.addEventListener('touchend',    clearLook, { passive: true });
+  c.addEventListener('touchend', clearLook, { passive: true });
   c.addEventListener('touchcancel', clearLook, { passive: true });
 }
+

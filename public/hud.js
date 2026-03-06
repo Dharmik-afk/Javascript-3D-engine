@@ -3,18 +3,25 @@
 //  HUD layer — drawn directly with ctx on top of
 //  the composited pixel buffers (layer 2).
 //
-//  drawMinimap(player, showBuckets)
+//  ctx coordinates are in canvas pixel space
+//  (0..W, 0..H = 0..800, 0..400).  No DPR
+//  scaling needed — the canvas is fixed 800×400
+//  and CSS handles all display scaling.
+//
+//  drawMinimap(player)
 //    Top-right corner: world bounds background,
 //    wall segments, player dot, facing line,
 //    and FOV cone.
-//    showBuckets — controlled by SHOW_BUCKETS in
-//    main.js. When true:
-//      Occupied cells — flat blue-white tint.
-//      Player's current cell — flat red tint.
-//      Grid lines drawn under segments.
 //
 //  drawDebug(player, fps)
 //    Top-left corner numeric readout.
+//
+//  toggleBuckets()
+//    Call from devtools console to toggle bucket
+//    grid overlay on the minimap.
+//    Occupied cells — flat blue-white tint.
+//    Player's current cell — flat red tint.
+//    Grid lines always drawn when overlay is on.
 // ─────────────────────────────────────────────
 
 import { ctx, W } from './canvas.js';
@@ -24,18 +31,25 @@ import {
 } from './map.js';
 
 // Minimap layout constants
-const MM_TILE = 10;                                  // pixels per tile unit
-const MM_PAD = 8;                                   // gap from canvas edge
-const MM_X = W - WORLD_W * MM_TILE - MM_PAD;     // left edge of minimap
-const MM_Y = MM_PAD;                              // top edge of minimap
+const MM_TILE = 10;
+const MM_PAD = 8;
+const MM_X = W - WORLD_W * MM_TILE - MM_PAD;
+const MM_Y = MM_PAD;
 
-export function drawMinimap(player, showBuckets) {
+// ── Bucket visualisation toggle ──────────────────────────────────
+let _showBuckets = false;
+export function toggleBuckets() {
+  _showBuckets = !_showBuckets;
+  console.log(`[hud] bucket overlay: ${_showBuckets ? 'ON' : 'OFF'}`);
+}
+
+export function drawMinimap(player) {
   // ── World bounds background ─────────────────────────────────
   ctx.fillStyle = '#0c0c1c';
   ctx.fillRect(MM_X, MM_Y, WORLD_W * MM_TILE, WORLD_H * MM_TILE);
 
   // ── Bucket overlay ───────────────────────────────────────────
-  if (showBuckets) {
+  if (_showBuckets) {
     const playerTX = player.pos.x | 0;
     const playerTY = player.pos.y | 0;
 
@@ -44,26 +58,15 @@ export function drawMinimap(player, showBuckets) {
         const occupied = getSegments(tx, ty).size > 0;
 
         if (tx === playerTX && ty === playerTY) {
-          // Player's current cell — red tint
           ctx.fillStyle = 'rgba(255, 80, 80, 0.35)';
-          ctx.fillRect(
-            MM_X + tx * MM_TILE,
-            MM_Y + ty * MM_TILE,
-            MM_TILE, MM_TILE
-          );
+          ctx.fillRect(MM_X + tx * MM_TILE, MM_Y + ty * MM_TILE, MM_TILE, MM_TILE);
         } else if (occupied) {
-          // Occupied cell — flat blue-white tint
           ctx.fillStyle = 'rgba(120, 160, 255, 0.25)';
-          ctx.fillRect(
-            MM_X + tx * MM_TILE,
-            MM_Y + ty * MM_TILE,
-            MM_TILE, MM_TILE
-          );
+          ctx.fillRect(MM_X + tx * MM_TILE, MM_Y + ty * MM_TILE, MM_TILE, MM_TILE);
         }
       }
     }
 
-    // Grid lines — drawn over fills, under segments
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
     ctx.lineWidth = 0.5;
     for (let tx = 0; tx <= WORLD_W; tx++) {
