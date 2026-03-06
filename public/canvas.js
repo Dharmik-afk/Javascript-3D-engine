@@ -24,8 +24,8 @@ export const c = document.querySelector('#c');
 export const ctx = c.getContext('2d');
 export const DPR = window.devicePixelRatio || 1;
 
-export const W = 800;
-export const H = 400;
+export const W = 1080;
+export const H = 720;
 
 c.width = W;
 c.height = H;

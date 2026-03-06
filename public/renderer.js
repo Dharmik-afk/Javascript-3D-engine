@@ -22,6 +22,20 @@
 //
 //  Hot-path pixel write optimisations
 //  ───────────────────────────────────
+//  • perpWallDist equals bestT directly.
+//    Proof: rayDir = dir + plane*camX.  plane ⊥ dir by construction,
+//    so rayDir·dir = |dir|² + camX*(plane·dir) = 1 + 0 = 1.
+//    The dot-product multiply is therefore always 1 and is omitted.
+//  • seg.ex / seg.ey / seg.absNY are precomputed at map-load time in
+//    map.js.  Math.hypot() no longer runs per rendered column.
+//  • Generation-counter dedup: _tested (Uint8Array, one slot per wall)
+//    and _generation (1-254 counter, bumped each column) ensure every
+//    segment is intersection-tested at most once per ray even when it
+//    spans multiple buckets.  No per-ray Set allocation — the array is
+//    module-level and reused.  When _generation would overflow 254,
+//    _tested is cleared and the counter resets to 1.
+//  • Bucket iteration uses Int16Array (converted from Sets in map.js) —
+//    tighter loop, better cache locality, no hash-map overhead.
 //  • Colour is packed to a single uint32 once per column,
 //    outside the vertical strip loop.
 //  • Strip loop uses a running index (idx += W) instead of
@@ -41,7 +55,20 @@ import {
   getSegments
 } from './map.js';
 
-const FOV_HALF_TAN = Math.tan(Math.PI / 6);   // tan(30°)
+const FOV_HALF_TAN = Math.tan(Math.PI / 6);  // tan(30°)
+const MAX_LINE_HEIGHT = H * 4;                   // clamp constant — avoids multiply per column
+
+// ── Generation-counter dedup ─────────────────────────────────────
+// A segment registered in N buckets would otherwise be tested N times
+// per ray as the DDA marches through those buckets.  bestT prevents
+// wrong results but wastes arithmetic.
+//
+// _tested[i] === _generation means segment i was already tested this ray.
+// _generation is bumped once per column.  When it would exceed 254,
+// _tested is zeroed and the counter resets — this happens roughly every
+// 254 rays (~every third frame at W = 800).  No per-ray allocation.
+const _tested = new Uint8Array(WALLS.length);
+let _generation = 1;
 
 // ── Layer 0: static sky + floor gradient ────────────────────────
 export function buildBackground() {
@@ -88,6 +115,10 @@ export function castRays(player) {
 
   for (let x = 0; x < W; x++) {
 
+    // Advance generation for this column.  Each segment can now be
+    // tested at most once — _tested[i] === _generation acts as the guard.
+    if (++_generation > 254) { _tested.fill(0); _generation = 1; }
+
     // camX: −1 (left edge) → +1 (right edge)
     const camX = (2 * x / W) - 1;
 
@@ -128,10 +159,15 @@ export function castRays(player) {
     while (true) {
 
       for (const i of getSegments(mapX, mapY)) {
+        // Skip if already tested this ray — segment spans multiple buckets
+        if (_tested[i] === _generation) continue;
+        _tested[i] = _generation;
+
         const seg = WALLS[i];
 
-        const ex = seg.x2 - seg.x1;
-        const ey = seg.y2 - seg.y1;
+        // seg.ex / seg.ey precomputed in map.js — no subtraction per ray
+        const ex = seg.ex;
+        const ey = seg.ey;
         const fx = seg.x1 - px;
         const fy = seg.y1 - py;
         const denom = rayDirX * ey - rayDirY * ex;
@@ -147,7 +183,7 @@ export function castRays(player) {
         }
       }
 
-      if (bestT < Infinity && Math.min(sideDistX, sideDistY) > bestT) break;
+      if (bestT < Infinity && (sideDistX < sideDistY ? sideDistX : sideDistY) > bestT) break;
 
       if (sideDistX < sideDistY) {
         sideDistX += deltaDistX;
@@ -163,20 +199,21 @@ export function castRays(player) {
     if (bestSeg < 0) continue;
 
     // ── Perpendicular distance (no fisheye) ───────────────────
-    const perpWallDist = bestT * (rayDirX * dirX + rayDirY * dirY);
+    // perpWallDist = bestT * (rayDir · dir).
+    // plane ⊥ dir by construction → rayDir·dir = |dir|² = 1 always.
+    // The multiply is omitted; bestT is the perpendicular distance directly.
+    const perpWallDist = bestT;
     if (perpWallDist <= 0) continue;
 
     // ── Vertical strip bounds ─────────────────────────────────
-    const lineHeight = Math.min(H * 4, (H / perpWallDist) | 0);
+    const lineHeight = Math.min(MAX_LINE_HEIGHT, (H / perpWallDist) | 0);
     const drawStart = Math.max(0, (H - lineHeight) >> 1);
     const drawEnd = Math.min(H, drawStart + lineHeight);
 
     // ── Shading ───────────────────────────────────────────────
+    // seg.absNY precomputed in map.js — Math.hypot() no longer runs here
     const seg = WALLS[bestSeg];
-    const sex = seg.x2 - seg.x1;
-    const sey = seg.y2 - seg.y1;
-    const slen = Math.hypot(sex, sey) || 1;
-    const shade = 0.55 + 0.45 * Math.abs(-sey / slen);
+    const shade = 0.55 + 0.45 * seg.absNY;
 
     const fog = Math.min(1, perpWallDist / 12);
     const scale = (1 - fog * 0.85) * shade;

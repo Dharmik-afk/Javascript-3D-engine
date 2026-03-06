@@ -3,9 +3,25 @@
 //  Vector map: walls as line segments + uniform
 //  bucket grid for spatial queries.
 //
-//  WALLS   — array of { x1, y1, x2, y2, r, g, b }
-//  BUCKETS — WORLD_W × WORLD_H grid; each cell is a
-//            Set of indices into WALLS.
+//  WALLS   — array of { x1, y1, x2, y2, r, g, b, ex, ey, absNY }
+//  BUCKETS — WORLD_W × WORLD_H grid; each cell is an Int16Array
+//            of indices into WALLS.
+//
+//  Why Int16Array instead of Set?
+//    Buckets are populated once at startup and never mutated.
+//    for...of over a Set pays iterator-protocol + hash-map overhead
+//    on every DDA step for every ray.  A typed array avoids both —
+//    the JIT can compile it to a tight counted loop with no object
+//    allocation and better cache locality.  Int16 is sufficient
+//    because WALLS.length will never approach 32 767 in practice.
+//
+//  Precomputed per-segment fields (set after all walls are defined):
+//    ex    = x2 - x1
+//    ey    = y2 - y1
+//    absNY = abs(-ey / length)  — used for normal-based wall shading.
+//            Equals the cosine of the angle between the segment normal
+//            and the horizontal axis.  Constant per wall so computing
+//            it inside castRays() every frame is pure waste.
 //
 //  Helpers:
 //    makeRect(x, y, w, h, r, g, b)
@@ -25,7 +41,7 @@
 //  call needed.
 //
 //  getSegments(tx, ty) — O(1) bucket lookup;
-//  returns an empty Set for out-of-bounds coords.
+//  returns an empty Int16Array for out-of-bounds coords.
 // ─────────────────────────────────────────────
 
 export const WORLD_W = 16;
@@ -81,9 +97,26 @@ makePolygon(
 // Lone diagonal — crosses centre-right, green
 WALLS.push({ x1: 9, y1: 6, x2: 13, y2: 3, r: 80, g: 200, b: 100 });
 
+// ── Precompute derived fields ─────────────────────────────────────
+// Done once here so renderer.js never pays for these in the hot path.
+// ex / ey   : segment direction vector — used in ray-segment intersection.
+// absNY     : abs of the segment normal's Y component, normalised.
+//             Drives the surface-angle shading term in castRays().
+//             Formula: abs(-ey / length).  For axis-aligned walls this
+//             is exactly 0 (vertical) or 1 (horizontal), matching the
+//             classic side-0/side-1 bright/dark convention.
+for (const seg of WALLS) {
+  const ex = seg.x2 - seg.x1;
+  const ey = seg.y2 - seg.y1;
+  const len = Math.hypot(ex, ey) || 1;
+  seg.ex = ex;
+  seg.ey = ey;
+  seg.absNY = Math.abs(-ey / len);
+}
+
 // ── Bucket grid ──────────────────────────────────────────────────
-const _empty = new Set();
-const _buckets = Array.from({ length: WORLD_W * WORLD_H }, () => new Set());
+// Phase 1: populate with Sets (fast insertion, automatic dedup during build)
+const _sets = Array.from({ length: WORLD_W * WORLD_H }, () => new Set());
 
 for (let i = 0; i < WALLS.length; i++) {
   const { x1, y1, x2, y2 } = WALLS[i];
@@ -97,9 +130,16 @@ for (let i = 0; i < WALLS.length; i++) {
     const ty = Math.floor(y1 + dy * t);
     const cx = Math.min(Math.max(tx, 0), WORLD_W - 1);
     const cy = Math.min(Math.max(ty, 0), WORLD_H - 1);
-    _buckets[cy * WORLD_W + cx].add(i);
+    _sets[cy * WORLD_W + cx].add(i);
   }
 }
+
+// Phase 2: freeze each Set into an Int16Array.
+// for...of over a typed array is a tight counted loop in the JIT —
+// no iterator-protocol overhead, no hash-map traversal per step.
+// The Sets are discarded after this point; only typed arrays survive.
+const _buckets = _sets.map(s => new Int16Array(s));
+const _empty = new Int16Array(0);
 
 // ── Public query ─────────────────────────────────────────────────
 export function getSegments(tx, ty) {
