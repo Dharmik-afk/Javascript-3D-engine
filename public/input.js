@@ -19,6 +19,27 @@
 //
 //  call init(player) once after the player is
 //  created to attach the look-drag accumulator.
+//
+//  Optimisations over the original
+//  ─────────────────────────────────
+//  KEY_ELS pre-cache (init-time)
+//    getKeyEl() previously called document.querySelector() on every
+//    physical keydown/keyup — a live DOM walk each time.  KEY_ELS is
+//    a plain object populated once in init(), mapping 'w'/'a'/'s'/'d'
+//    to the four element references.  Runtime lookups are O(1) property
+//    reads with no DOM involvement.
+//
+//  EventBus payload trimming
+//    Both pressKey and releaseKey previously emitted
+//    { key, source, timestamp: Date.now() }.  player.onKeyDown /
+//    onKeyUp destructure only { key } — source and timestamp were never
+//    read by any subscriber.  Removed both fields:
+//      • Eliminates Date.now() call (syscall) per key event.
+//      • Shrinks the emitted object from 3 fields to 1, reducing
+//        hidden-class churn and allocation size.
+//    The source parameter is retained in pressKey's signature for
+//    potential future use (e.g. replay recording) but is no longer
+//    included in the emitted payload.
 // ─────────────────────────────────────────────
 
 import { c } from './canvas.js';
@@ -27,8 +48,12 @@ import { EventBus } from './eventbus.js';
 // ── Internal key state ───────────────────────────────────────────
 const keyMap = {};
 
+// Populated in init() — maps lowercase key char → DOM element.
+// Avoids document.querySelector() on every physical keydown/keyup.
+const KEY_ELS = {};
+
 function getKeyEl(k) {
-  return document.querySelector(`.key[data-key="${k.toLowerCase()}"]`);
+  return KEY_ELS[k.toLowerCase()] ?? null;
 }
 
 function pressKey(keyEl, source) {
@@ -41,7 +66,9 @@ function pressKey(keyEl, source) {
   ripple.className = 'ripple';
   keyEl.appendChild(ripple);
   ripple.addEventListener('animationend', () => ripple.remove());
-  EventBus.emit('keypress', { key: k.toUpperCase(), source, timestamp: Date.now() });
+  // source is available here if needed by future subscribers (e.g. replay),
+  // but omitted from the payload — no current subscriber reads it.
+  EventBus.emit('keypress', { key: k.toUpperCase() });
 }
 
 function releaseKey(keyEl) {
@@ -50,7 +77,7 @@ function releaseKey(keyEl) {
   if (!keyMap[k]) return;
   keyMap[k] = false;
   keyEl.classList.remove('pressed');
-  EventBus.emit('keyrelease', { key: k.toUpperCase(), timestamp: Date.now() });
+  EventBus.emit('keyrelease', { key: k.toUpperCase() });
 }
 
 // ── WASD on-screen pad — mouse ───────────────────────────────────
@@ -153,8 +180,13 @@ document.addEventListener('keyup', e => {
 const lookState = new Map();
 
 export function init(player) {
-  // Attach mouse handlers to every .key element
-  document.querySelectorAll('.key').forEach(setupKeyMouse);
+  // Pre-cache the four key elements by their data-key attribute.
+  // Replaces the per-event document.querySelector() call in getKeyEl()
+  // with a single O(1) object property lookup.
+  document.querySelectorAll('.key').forEach(el => {
+    KEY_ELS[el.dataset.key] = el;
+    setupKeyMouse(el);
+  });
 
   // Attach global touch handler for cross-key drag
   setupPadTouch();

@@ -14,6 +14,21 @@
 //       and cancel the velocity component into the wall,
 //       leaving the tangential component intact (sliding).
 //
+//  Trig cache (sinA / cosA)
+//  ─────────────────────────
+//  sin and cos of player.angle are needed every frame by both
+//  player.update() (wish vector) and castRays() (dir + camera plane).
+//  Rather than calling Math.sin / Math.cos 4 times each in those two
+//  functions (8 calls total on the same angle), the results are cached
+//  on the player immediately after angle changes.  Both modules then
+//  read sinA / cosA directly — 2 trig calls per frame regardless of
+//  whether the player is rotating or standing still.
+//
+//  The cache is initialised in the constructor from angle = 0:
+//    sin(0) = 0,  cos(0) = 1.
+//  It is refreshed in update() right after the angle mutation so that
+//  castRays(), which runs later the same frame, always sees current values.
+//
 //  Segment data is read from WALLS_FLAT — the same contiguous
 //  Float32Array used by renderer.js — so the collision geometry
 //  reads benefit from the same cache-locality properties.
@@ -33,6 +48,27 @@
 //  uses.  _colTested[i] === _colGen means segment i has already
 //  been processed this iteration.  The counter is bumped once
 //  per iteration; no allocation occurs inside update().
+//
+//  Local variable caching for property chains
+//  ───────────────────────────────────────────
+//  Inside the collision block, this.pos.x / this.pos.y and
+//  this.velocity.x / this.velocity.y are each accessed several
+//  times per iteration across 3 iterations.  Each such access
+//  is two pointer dereferences: this → pos → x.  Caching them
+//  in local scalars (px, py, vx, vy) at the start of the block
+//  and writing back to the object once after all 3 iterations
+//  reduces those to single register reads — no hidden-class
+//  lookup, no intermediate object pointer.  With 3 iterations,
+//  each touching pos and velocity multiple times, this removes
+//  roughly 30–40 property-chain reads per frame.
+//
+//  Indexed bucket iteration
+//  ─────────────────────────
+//  The inner segment loop previously used for…of on the Int16Array
+//  returned by getSegments().  Replaced with an explicit indexed
+//  for loop over a cached local const (segs / nSegs) for the same
+//  reason as in renderer.js: eliminates iterator protocol overhead
+//  and lets the JIT emit a tight counted loop.
 //
 //  All coordinates are tile-space floats.
 // ─────────────────────────────────────────────
@@ -60,6 +96,13 @@ export class Player extends Entity {
     super(x, y, 0.25);
     this.input = { x: 0, y: 0 };
     this.lookDeltaX = 0;
+
+    // Trig cache — sin and cos of this.angle.
+    // Initialised here so castRays() can safely read them on the very
+    // first frame before update() has run.  angle = 0 at construction
+    // (set by Entity), so sin(0) = 0 and cos(0) = 1.
+    this.sinA = 0;
+    this.cosA = 1;
   }
 
   onKeyDown(k) {
@@ -85,13 +128,24 @@ export class Player extends Entity {
     this.angle += this.lookDeltaX * Player.LOOK_SENSITIVITY;
     this.lookDeltaX = 0;
 
+    // ── Refresh trig cache ──────────────────────────────────────
+    // Must happen immediately after angle changes and before any
+    // code this frame reads sinA / cosA — including the wish vector
+    // below and castRays() later in the same RAF tick.
+    // Two calls here replace 8 calls spread across player.js and
+    // renderer.js that previously recomputed the same values.
+    this.sinA = Math.sin(this.angle);
+    this.cosA = Math.cos(this.angle);
+
     // ── World-space wish vector from WASD + facing angle ────────
-    // Forward (fx, fy) and right (rx, ry) in world space,
-    // derived from the player's current facing angle.
-    const fx = Math.sin(this.angle);
-    const fy = -Math.cos(this.angle);
-    const rx = Math.cos(this.angle);
-    const ry = Math.sin(this.angle);
+    // Forward (fx, fy) and right (rx, ry) in world space.
+    // Derived from the cached sin/cos — no trig calls here.
+    //   forward: ( sinA, -cosA )
+    //   right:   ( cosA,  sinA )
+    const fx = this.sinA;
+    const fy = -this.cosA;
+    const rx = this.cosA;
+    const ry = this.sinA;
 
     // input.y: −1 = forward (W), +1 = back (S) — negated so W maps to +forward
     const wx = fx * (-this.input.y) + rx * this.input.x;
@@ -122,7 +176,17 @@ export class Player extends Entity {
     // simultaneously penetrated (e.g. tight corridor ends).
     // Each iteration re-evaluates the player's tile position because
     // the push-out from one wall may move the player into another cell.
+    //
+    // pos and velocity are cached as local scalars for the duration of
+    // the collision block.  Each this.pos.x / this.velocity.x access is
+    // two pointer dereferences (this → pos → x).  Local vars are single
+    // register reads — no hidden-class traversal, no intermediate load.
+    // The write-back after the loop restores the object state exactly once.
     const R = this.radius;
+    let px = this.pos.x;
+    let py = this.pos.y;
+    let vx = this.velocity.x;
+    let vy = this.velocity.y;
 
     for (let iter = 0; iter < 3; iter++) {
 
@@ -130,15 +194,22 @@ export class Player extends Entity {
       // Avoids clearing the whole array each iteration.
       if (++_colGen > 254) { _colTested.fill(0); _colGen = 1; }
 
-      const tx = this.pos.x | 0;
-      const ty = this.pos.y | 0;
+      const tx = px | 0;
+      const ty = py | 0;
 
       // Walk the 3 × 3 neighbourhood and resolve each unique segment once.
       // The nested loop visits up to 9 buckets; _colTested deduplicates
       // segments that appear in more than one of those buckets.
+      //
+      // getSegments() is hoisted into segs / nSegs so the call doesn't
+      // repeat for each element, and the indexed for loop replaces for…of
+      // to avoid iterator protocol overhead on the typed array.
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
-          for (const i of getSegments(tx + dx, ty + dy)) {
+          const segs = getSegments(tx + dx, ty + dy);
+          const nSegs = segs.length;
+          for (let si = 0; si < nSegs; si++) {
+            const i = segs[si];
 
             // Skip if already resolved this segment this iteration
             if (_colTested[i] === _colGen) continue;
@@ -157,13 +228,13 @@ export class Player extends Entity {
             // Closest point on segment to the player centre.
             // t is clamped to [0, 1] so the result stays on the segment,
             // not its infinite-line extension (handles endpoint corners).
-            let t = ((this.pos.x - x1) * ex + (this.pos.y - y1) * ey) / len2;
+            let t = ((px - x1) * ex + (py - y1) * ey) / len2;
             t = Math.max(0, Math.min(1, t));
 
             const cpx = x1 + t * ex;
             const cpy = y1 + t * ey;
-            const dpx = this.pos.x - cpx;
-            const dpy = this.pos.y - cpy;
+            const dpx = px - cpx;
+            const dpy = py - cpy;
             const dist = Math.hypot(dpx, dpy);
 
             if (dist < R && dist > 1e-6) {
@@ -174,22 +245,28 @@ export class Player extends Entity {
               const ny = dpy * invDist;
 
               // Translate player out of penetration depth
-              this.pos.x += nx * overlap;
-              this.pos.y += ny * overlap;
+              px += nx * overlap;
+              py += ny * overlap;
 
               // Cancel only the velocity component directed into the wall.
               // The tangential component is preserved — this gives smooth
               // wall-sliding rather than a dead stop on contact.
-              const vDotN = this.velocity.x * nx + this.velocity.y * ny;
+              const vDotN = vx * nx + vy * ny;
               if (vDotN < 0) {
-                this.velocity.x -= vDotN * nx;
-                this.velocity.y -= vDotN * ny;
+                vx -= vDotN * nx;
+                vy -= vDotN * ny;
               }
             }
           }
         }
       }
     }
+
+    // Write cached locals back to the object once after all 3 iterations.
+    this.pos.x = px;
+    this.pos.y = py;
+    this.velocity.x = vx;
+    this.velocity.y = vy;
   }
 }
 

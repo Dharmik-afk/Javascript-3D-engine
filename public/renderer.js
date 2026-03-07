@@ -16,6 +16,25 @@
 //         the closest hit found so far.
 //      5. Draw a distance-shaded vertical strip into Buffers.world.
 //
+//  Trig cache
+//  ──────────
+//  castRays previously called Math.sin and Math.cos on player.angle
+//  four times per frame to build dirX/dirY/planeX/planeY.
+//  player.update() called them four more times on the same angle to
+//  build the movement wish vector — 8 trig calls total per frame.
+//
+//  player.js now caches sinA = sin(angle) and cosA = cos(angle)
+//  immediately after each angle mutation.  castRays reads those
+//  cached values instead, reducing the total to 2 trig calls per
+//  frame (both in player.update), regardless of whether the player
+//  is rotating or standing still.
+//
+//  The derivation from sinA / cosA:
+//    dirX   =  sinA                  (forward X component)
+//    dirY   = -cosA                  (forward Y component)
+//    planeX =  cosA * FOV_HALF_TAN   (camera plane X)
+//    planeY =  sinA * FOV_HALF_TAN   (camera plane Y)
+//
 //  Flat-array hot path
 //  ───────────────────
 //  Wall data is stored in WALLS_FLAT — a Float32Array with SEG_SIZE=8
@@ -54,6 +73,23 @@
 //      already clamped to [0, H).
 //    • perpWallDist === bestT directly (no dot-product multiply needed).
 //      Proof: rayDir = dir + plane*camX; plane ⊥ dir → rayDir·dir = 1.
+//
+//  Math.abs cache
+//    deltaDistX / deltaDistY each previously called Math.abs twice on
+//    the same value — once for the zero-guard and once for the
+//    reciprocal.  abs(1/x) = 1/abs(x) for x ≠ 0, so caching abs(rayDirX)
+//    and abs(rayDirY) in adx / ady reduces 4 Math.abs calls per column
+//    to 2 (= 1600 fewer calls per frame at W=800).
+//
+//  Indexed bucket iteration
+//    The inner segment loop previously used for…of on the Int16Array
+//    returned by getSegments().  for…of invokes the iterator protocol
+//    (Symbol.iterator, repeated next() calls) which adds per-step
+//    overhead even on typed arrays.  Replacing it with an explicit
+//    indexed for loop over a cached .length lets the JIT emit a tight
+//    counted loop with a single branch per step and no iterator object.
+//    getSegments() is also hoisted into a local const so the call does
+//    not repeat on every bucket visit in the DDA march.
 //
 //  FOV = 60°  →  camera-plane half-length = tan(30°) ≈ 0.57735
 // ─────────────────────────────────────────────
@@ -116,12 +152,14 @@ export function castRays(player) {
   const px = player.pos.x;
   const py = player.pos.y;
 
-  // Forward unit vector and perpendicular camera plane.
-  // Convention: north = 0, clockwise positive (matches player.angle).
-  const dirX = Math.sin(player.angle);
-  const dirY = -Math.cos(player.angle);
-  const planeX = Math.cos(player.angle) * FOV_HALF_TAN;
-  const planeY = Math.sin(player.angle) * FOV_HALF_TAN;
+  // Forward unit vector and perpendicular camera plane, built from
+  // the player's cached sin/cos rather than calling Math.sin/cos here.
+  // player.update() already computed and stored sinA/cosA this frame.
+  // See renderer.js file header for the full derivation.
+  const dirX = player.sinA;
+  const dirY = -player.cosA;
+  const planeX = player.cosA * FOV_HALF_TAN;
+  const planeY = player.sinA * FOV_HALF_TAN;
 
   for (let x = 0; x < W; x++) {
 
@@ -134,23 +172,30 @@ export function castRays(player) {
     const rayDirX = dirX + planeX * camX;
     const rayDirY = dirY + planeY * camX;
 
-    // Starting bucket — floor of player position in tile-space
-    let mapX = px | 0;
-    let mapY = py | 0;
-
-    // DDA delta distances.  Sentinel 1e30 for near-zero direction components
-    // prevents division-by-zero and keeps step logic uniform for all angles.
-    const deltaDistX = Math.abs(rayDirX) < 1e-10 ? 1e30 : Math.abs(1 / rayDirX);
-    const deltaDistY = Math.abs(rayDirY) < 1e-10 ? 1e30 : Math.abs(1 / rayDirY);
+    // DDA delta distances.
+    // adx / ady: cache Math.abs(rayDir*) so each component is evaluated once.
+    //   abs(1 / rayDirX) == 1 / abs(rayDirX) when rayDirX ≠ 0, so we reuse
+    //   adx / ady for the reciprocal — eliminating 2 redundant Math.abs calls
+    //   per column (4 total → 2; 1600 fewer calls per frame at W = 800).
+    // Sentinel 1e30 for near-zero direction components prevents division-by-zero
+    // and keeps step logic uniform for all angles.
+    const adx = Math.abs(rayDirX);
+    const ady = Math.abs(rayDirY);
+    const deltaDistX = adx < 1e-10 ? 1e30 : 1 / adx;
+    const deltaDistY = ady < 1e-10 ? 1e30 : 1 / ady;
 
     // Step direction (-1 or +1) and distance to the first cell boundary
     let stepX, sideDistX;
-    if (rayDirX < 0) { stepX = -1; sideDistX = (px - mapX) * deltaDistX; }
-    else { stepX = 1; sideDistX = (mapX + 1 - px) * deltaDistX; }
+    if (rayDirX < 0) { stepX = -1; sideDistX = (px - (px | 0)) * deltaDistX; }
+    else { stepX = 1; sideDistX = ((px | 0) + 1 - px) * deltaDistX; }
 
     let stepY, sideDistY;
-    if (rayDirY < 0) { stepY = -1; sideDistY = (py - mapY) * deltaDistY; }
-    else { stepY = 1; sideDistY = (mapY + 1 - py) * deltaDistY; }
+    if (rayDirY < 0) { stepY = -1; sideDistY = (py - (py | 0)) * deltaDistY; }
+    else { stepY = 1; sideDistY = ((py | 0) + 1 - py) * deltaDistY; }
+
+    // Starting bucket — floor of player position in tile-space
+    let mapX = px | 0;
+    let mapY = py | 0;
 
     // ── DDA march ──────────────────────────────────────────────
     let bestT = Infinity;
@@ -158,8 +203,16 @@ export function castRays(player) {
 
     while (true) {
 
-      // Test every segment registered in the current bucket
-      for (const i of getSegments(mapX, mapY)) {
+      // Hoist getSegments() into a local const and iterate with an explicit
+      // indexed for loop.  for…of on a typed array invokes the iterator
+      // protocol (Symbol.iterator + repeated next() calls) on every step;
+      // an indexed loop compiles to a single branch per iteration with no
+      // iterator object allocation.
+      const segs = getSegments(mapX, mapY);
+      const nSegs = segs.length;
+      for (let si = 0; si < nSegs; si++) {
+        const i = segs[si];
+
         if (_tested[i] === _generation) continue;   // already tested this column
         _tested[i] = _generation;
 
