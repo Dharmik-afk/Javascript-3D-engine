@@ -1,8 +1,9 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
-const HOST = '127.0.0.1';
+const HOST = '0.0.0.0';
 const DEFAULT_PORT = 8000;
 
 // Absolute path to web root
@@ -82,7 +83,23 @@ const port = process.argv[2]
   ? parseInt(process.argv[2], 10)
   : DEFAULT_PORT;
 
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+
+  return '127.0.0.1';
+}
 server.listen(port, HOST, () => {
-  console.log(`Serving http://${HOST}:${port}/`);
+  const ip = getLocalIP();
+
+  console.log(`Serving locally: http://localhost:${port}/`);
+  console.log(`Serving on LAN:  http://${ip}:${port}/`);
   console.log(`Web root: ${PUBLIC_DIR}`);
 });
